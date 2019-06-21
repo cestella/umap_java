@@ -1,7 +1,13 @@
 package com.caseystella.ds.vectorize.umap;
 
 
-import org.apache.commons.lang3.NotImplementedException;
+import com.caseystella.ds.vectorize.math.CurveFitter;
+import org.apache.commons.math3.analysis.ParametricUnivariateFunction;
+import org.apache.commons.math3.analysis.differentiation.DerivativeStructure;
+import org.apache.commons.math3.fitting.WeightedObservedPoints;
+import org.nd4j.linalg.api.buffer.DataType;
+import org.nd4j.linalg.factory.Nd4j;
+import org.nd4j.linalg.primitives.Pair;
 
 import java.util.*;
 
@@ -420,14 +426,73 @@ public class UMAP {
       private Optional<Boolean> verbose = Optional.of(false);
 
       public UMAP build() {
+         validate();
          if(!a.isPresent() && !b.isPresent()) {
-            //TODO: Implement this!
-            throw new NotImplementedException("Unfortunately, we haven't implemented computing a and b yet.");
+            Pair<Double, Double> ab = computeABParams(getSpread(), getMinDistance());
+            a = OptionalDouble.of(ab.getKey());
+            b = OptionalDouble.of(ab.getValue());
          }
          return new UMAP(this);
       }
-      private void validate() {
 
+      protected static Pair<Double, Double> computeABParams(double spread, double minDist) {
+         /*
+          *    """Fit a, b params for the differentiable curve used in lower
+          *     dimensional fuzzy simplicial complex construction. We want the
+          *     smooth curve (from a pre-defined family with simple gradient) that
+          *     best matches an offset exponential decay.
+          *     """
+          *
+          *     def curve(x, a, b):
+          *         return 1.0 / (1.0 + a * x ** (2 * b))
+          *
+          *     xv = np.linspace(0, spread * 3, 300)
+          *     yv = np.zeros(xv.shape)
+          *     yv[xv < min_dist] = 1.0
+          *     yv[xv >= min_dist] = np.exp(-(xv[xv >= min_dist] - min_dist) / spread)
+          *     params, covar = curve_fit(curve, xv, yv)
+          *     return params[0], params[1]
+          */
+         final WeightedObservedPoints obs = new WeightedObservedPoints();
+         for(double x : Nd4j.linspace(0, spread * 3, 300, DataType.DOUBLE).toDoubleVector()) {
+            double y = 1.0d;
+            if(x >= minDist) {
+               y = Math.exp(-1*(x - minDist) / spread);
+            }
+            obs.add(x, y);
+         }
+         ParametricUnivariateFunction func = new ParametricUnivariateFunction() {
+            @Override
+            public double value(double x, double... parameters) {
+               return 1.0 / (1.0 + parameters[0]* Math.pow(x, 2*parameters[1]));
+            }
+
+            @Override
+            public double[] gradient(double x, double... parameters) {
+               final double a = parameters[0];
+               final double b = parameters[1];
+               DerivativeStructure one = new DerivativeStructure(2, 1, 1.0);
+               DerivativeStructure two = new DerivativeStructure(2, 1, 2.0);
+               DerivativeStructure aDev = new DerivativeStructure(2, 1, 0, a);
+               DerivativeStructure bDev = new DerivativeStructure(2, 1, 1, b);
+               DerivativeStructure y = one.divide(one.add( aDev.multiply(DerivativeStructure.pow(x, two.multiply(bDev)))));
+
+               return new double[] {
+                       y.getPartialDerivative(1, 0),
+                       y.getPartialDerivative(0, 1)
+               };
+            }
+         };
+         double[] params = CurveFitter.fit(func, obs.toList(), new double[]{2.0, 2.0});
+
+         return Pair.of(params[0], params[1]);
+      }
+
+      private void validate() {
+         boolean invalidAbCondition = (a.isPresent() && !b.isPresent()) || (b.isPresent() && !a.isPresent());
+         if(invalidAbCondition) {
+            throw new IllegalStateException("You must either specify both a and b or neither.");
+         }
       }
    }
 
